@@ -131,7 +131,7 @@ void setup() {
   attachInterrupt(digitalPinToInterrupt(SWITCH_PIN), switchPressed, RISING);
 }
 
-uint64 counter = 0;
+uint64_t counter = 0;
 
 void loop() {
   wifiManager.process();
