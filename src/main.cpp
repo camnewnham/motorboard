@@ -8,32 +8,39 @@
 
 // My TMC https://www.aliexpress.com/item/1005002965406330.html
 
-#define LED_PIN           2       // Visual feedback
-#define EN_PIN            0       // Enable pin
+#define EN_PIN            5       // Driver Enable pin
+#define LED_PIN           2       // D1 Mini Hardware LED
 #define DRIVER_ADDRESS    0b00    // TMC2209 Driver address
 #define R_SENSE           0.11f   // SilentStepStick series use 0.11
-//#define DRIVER_SERIAL     Serial  // TMC2208/TMC2224 HardwareSerial port
 #define SWITCH_PIN        13      // Physical input
 
-#define SW_RX             14       // Software RX
-#define SW_TX             12       // Software TX
+#define SW_RX             14      // Software RX
+#define SW_TX             12      // Software TX
 
 #define MICROSTEPS        0       // Microstepping
 #define RMS_CURRENT       636     // Motor RMS current in MA. My stepper is 42SHDC3025-24B which has peak current 0.9A = 636mA RMS
 
-#define MOTOR_SPEED       1000    // Motor speed. Multiply by microsteps for consistency
-#define MOTOR_ACCEL       10      // Acceleration
+#define MOTOR_SPEED       960     // Motor speed. Multiply by microsteps for consistency
+
+enum CoverState {
+  COVER_STOPPED,
+  COVER_CLOSED,
+  COVER_OPENING,
+  COVER_CLOSING,
+  COVER_OPEN
+};
 
 WiFiManager wifiManager;
+
 SoftwareSerial DRIVER_SERIAL(SW_RX,SW_TX);
 TMC2209Stepper driver(&DRIVER_SERIAL, R_SENSE, DRIVER_ADDRESS);   // Create TMC driver
 
 void configureDriver() {
+  pinMode(LED_PIN, OUTPUT);
   pinMode(EN_PIN, OUTPUT);
   DRIVER_SERIAL.begin(115200);
 
   driver.begin();
-
   driver.toff(5);                       // Enables driver in software
   driver.rms_current(RMS_CURRENT);      // Set motor RMS current (mA)
   driver.microsteps(MICROSTEPS);        // Set microsteps
@@ -44,11 +51,11 @@ void configureDriver() {
 
   driver.freewheel(1);                  // Freewheel stop
 
-  driver.en_spreadCycle(false);         // Toggle spreadCycle
+  //driver.en_spreadCycle(true);        // Toggle spreadCycle
   driver.pwm_autoscale(true);           // Needed for stealthChop
 
   driver.VACTUAL(0);                    // Ensure motor is stopped
-  digitalWrite(EN_PIN, HIGH);           // Start disabled
+  digitalWrite(EN_PIN, LOW);            // Start disabled
 
 }
 
@@ -56,100 +63,87 @@ void configureWiFi() {
   if (false) { // TODO configure a boot process that clears wifi config, i.e. if both endstops are pressed.
     wifiManager.erase();
   }
+
   wifiManager.setConfigPortalBlocking(false);
   wifiManager.autoConnect();
 }
 
-enum CoverState {
-  COVER_STOPPED,
-  COVER_CLOSED,
-  COVER_OPENING,
-  COVER_CLOSING,
-  COVER_OPEN
-};
+CoverState next_state = COVER_STOPPED;
+CoverState current_state = COVER_STOPPED;
 
-CoverState state = COVER_STOPPED;
+void setMotorState() {
+ if (next_state == current_state) return;
+  current_state = next_state;
 
-unsigned long switchDebounce = 0;
-void IRAM_ATTR switchPressed() {  
-  if (millis() - switchDebounce < 50) return;
-  switchDebounce = millis();
-
-  switch (state) {
-    case COVER_OPEN:
-      state = COVER_CLOSING;
-      break;
-    case COVER_STOPPED:
-    case COVER_CLOSED:
-      state = COVER_OPENING;
-      break;
-    case COVER_CLOSING:
-      state = COVER_CLOSED;
-      break;
+  switch (current_state) {
     case COVER_OPENING:
-      state = COVER_OPEN;
-      break;
-    default:
-      state = COVER_STOPPED;
-      break;
-  };
-}
-
-void enableMotor(bool state) {
-  digitalWrite(EN_PIN, state ? LOW : HIGH);
-}
-
-void move() {
-  switch (state) {
-    case COVER_OPENING:
-      //digitalWrite(LED_PIN, LOW);
-      enableMotor(true);
+      digitalWrite(EN_PIN, LOW);
       driver.VACTUAL(-MOTOR_SPEED);
       break;
     case COVER_CLOSING:
-      //digitalWrite(LED_PIN, LOW);
-      enableMotor(true);
+      digitalWrite(EN_PIN, LOW);
       driver.VACTUAL(MOTOR_SPEED);
       break;
     default:
-      //digitalWrite(LED_PIN, HIGH);
-      enableMotor(false);
       driver.VACTUAL(0);
+      digitalWrite(EN_PIN, HIGH);
       break;
   };
-  delay(10);
+}
+
+uint8_t switch_state = HIGH;
+
+void checkSwitch() {
+  if (digitalRead(SWITCH_PIN) == switch_state) return;
+  switch_state = digitalRead(SWITCH_PIN);
+
+  if (switch_state == HIGH) return; // Trigger on press (not release)
+
+  switch (current_state) {
+      case COVER_OPEN:
+        next_state = COVER_CLOSING;
+        Serial.println("Cover closing");
+        break;
+      case COVER_STOPPED:
+      case COVER_CLOSED:
+        next_state = COVER_OPENING;
+        Serial.println("Cover opening");
+        break;
+      case COVER_CLOSING:
+        next_state = COVER_CLOSED;
+        Serial.println("Cover closed");
+        break;
+      case COVER_OPENING:
+        next_state = COVER_OPEN;
+        Serial.println("Cover open");
+        break;
+      default:
+        next_state = COVER_STOPPED;
+        break;
+    };
 }
 
 void setup() {
   Serial.begin(115200); 
-  pinMode(LED_PIN, OUTPUT);
 
   configureWiFi();
   configureDriver();
 
   pinMode(SWITCH_PIN, INPUT);
-  attachInterrupt(digitalPinToInterrupt(SWITCH_PIN), switchPressed, RISING);
+  switch_state = digitalRead(SWITCH_PIN);
 }
 
 uint64_t counter = 0;
 
 void loop() {
+  checkSwitch();
+  setMotorState();
+  
   wifiManager.process();
-  move();
   
   counter++;
-  if (counter%100 == 0) {
-    if (driver.test_connection() == 2) {
-      digitalWrite(LED_PIN, HIGH);
-    }
-    else {
-      // led on is good
-      digitalWrite(LED_PIN, LOW);
-    }
-
-
-      Serial.print("v=");
-      Serial.println(driver.test_connection(), HEX);
-
+  if (counter%1000 == 0) {
+      digitalWrite(LED_PIN, driver.test_connection() == 2 ? HIGH : LOW);
+      //Serial.print("Status: "); Serial.println(driver.test_connection());
   }
 }
