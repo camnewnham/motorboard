@@ -254,8 +254,8 @@ void setup() {
   Serial.begin(115200); 
   pinMode(LED_PIN, OUTPUT);
 
-  pinMode(ENDSTOP_0_PIN, INPUT);
-  pinMode(ENDSTOP_1_PIN, INPUT);
+  pinMode(ENDSTOP_0_PIN, INPUT_PULLUP);
+  pinMode(ENDSTOP_1_PIN, INPUT_PULLUP);
   endstop_0_state = digitalRead(ENDSTOP_0_PIN);
   endstop_1_state = digitalRead(ENDSTOP_1_PIN);
 
