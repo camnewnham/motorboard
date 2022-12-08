@@ -10,27 +10,32 @@
 #define LED_PIN           2       // D1 Mini Hardware LED
 #define DRIVER_ADDRESS    0b00    // TMC2209 Driver address
 #define R_SENSE           0.11f   // SilentStepStick series use 0.11
-#define ENDSTOP_0_PIN     4       // Physical input
-#define ENDSTOP_1_PIN     0       // Physical input
+#define ENDSTOP_0_PIN     12       // Physical input
+#define ENDSTOP_1_PIN     13       // Physical input
 
-#define SW_RX             14      // Software RX
-#define SW_TX             12      // Software TX
+#define SW_RX             16      // Software RX
+#define SW_TX             14      // Software TX
 
 #define MICROSTEPS        0       // Microstepping
 #define RMS_CURRENT       636     // Motor RMS current in MA. My stepper is 42SHDC3025-24B which has peak current 0.9A = 636mA RMS
 
-#define MOTOR_SPEED       960     // Motor speed. Multiply by microsteps for consistency
+// Motor speed. Multiply by microsteps for consistency
+#define MAX_SPEED         1000 * (MICROSTEPS == 0 ? 1 : MICROSTEPS)     
 #define MOTOR_ACCEL       2       // Acceleration steps per microprocessor frequency
+
+#define MAX_MOVE_DURATION 30000   // Number of milliseconds before a safety stop is triggered
 
 WiFiClient wifiClient;   // MQTT Controller
 HADevice device;
 HAMqtt mqtt(wifiClient, device);
 HACover cover("coverboard", HACover::Features::PositionFeature);
+HANumber number("coverboard_speed", HABaseDeviceType::NumberPrecision::PrecisionP2);
 
 WiFiManager wifiManager; // WiFi AP controller
 WiFiManagerParameter wfm_mqtt_server("mqtt_s", "MQTT Server", "homeassistant.local", 40);
 WiFiManagerParameter wfm_mqtt_username("mqtt_u", "MQTT UserName", "user", 24);
 WiFiManagerParameter wfm_mqtt_password("mqtt_p", "MQTT Password", "passwd", 24);
+WiFiManagerParameter wfm_move_multiplier("move_mult", "Speed (0-1)", "0.5", 10);
 
 SoftwareSerial DRIVER_SERIAL(SW_RX,SW_TX);
 TMC2209Stepper driver(&DRIVER_SERIAL, R_SENSE, DRIVER_ADDRESS);   // Create TMC driver
@@ -51,6 +56,9 @@ int32_t dest_speed = 0;
 
 uint8_t endstop_0_state = HIGH;
 uint8_t endstop_1_state = HIGH;
+
+uint64_t move_start_time = 0;
+float_t move_speed_multiplier = 0.5;
 
 bool mqtt_initialized = false;
 
@@ -83,6 +91,7 @@ void configureWiFiAP() {
   wifiManager.addParameter(&wfm_mqtt_server);
   wifiManager.addParameter(&wfm_mqtt_username);
   wifiManager.addParameter(&wfm_mqtt_password);
+  wifiManager.addParameter(&wfm_move_multiplier);
 
   wifiManager.setConfigPortalBlocking(false);
 
@@ -116,6 +125,13 @@ void configureMQTT() {
 
     cover.onCommand(onCoverCommand);
     cover.setName("Coverboard");
+    number.setName("Coverboard Speed");
+    number.setStep(0.01);
+    number.setMin(0);
+    number.setMax(1);
+
+    String moveSpdStr(wfm_move_multiplier.getValue());
+    move_speed_multiplier = moveSpdStr.toFloat(); 
 
     mqtt.begin(wfm_mqtt_server.getValue(), 1883U, wfm_mqtt_username.getValue(), wfm_mqtt_password.getValue());
 }
@@ -135,7 +151,7 @@ void loopMQTT() {
 }
 
 void setTargetSpeed(int32_t speed) {
-  dest_speed = speed;
+  dest_speed = (speed * move_speed_multiplier);
 
   if (dest_speed == 0) { // Stops are immediate
     current_speed = dest_speed;
@@ -153,7 +169,8 @@ void setCoverState() {
 
     switch (cover_state_current) {
       case COVER_OPENING:
-        setTargetSpeed(MOTOR_SPEED);
+        move_start_time = millis();
+        setTargetSpeed(MAX_SPEED);
         if (mqtt_initialized) 
         {
           cover.setState(HACover::CoverState::StateOpening);
@@ -162,7 +179,8 @@ void setCoverState() {
         Serial.println("Cover state: Opening"); 
         break;
       case COVER_CLOSING:
-        setTargetSpeed(-MOTOR_SPEED);
+        move_start_time = millis();
+        setTargetSpeed(-MAX_SPEED);
         if (mqtt_initialized) 
         {
           cover.setState(HACover::CoverState::StateClosing);
@@ -264,13 +282,15 @@ void setup() {
 }
 
 void loop() {
+  if (millis() - move_start_time > MAX_MOVE_DURATION) { // Safety stop
+    cover_state_next = COVER_STOPPED;
+  }
+
   wifiManager.process();
+  digitalWrite(LED_PIN, wifiManager.getConfigPortalActive() ? LOW : HIGH); // LED on while portal is active
   loopMQTT();
 
   checkEndstop(ENDSTOP_0_PIN, &endstop_0_state, true);
   checkEndstop(ENDSTOP_1_PIN, &endstop_1_state, false);
-
   setCoverState();
-
-  digitalWrite(LED_PIN, wifiManager.getConfigPortalActive() ? LOW : HIGH);
 }
