@@ -23,7 +23,7 @@ void setup()
   while (!Serial)
     ;
 
-  softwareSerial.begin(9600);
+  softwareSerial.begin(57600);
 
   pinMode(EN_PIN, OUTPUT);
   digitalWrite(EN_PIN, LOW);
