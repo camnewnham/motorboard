@@ -1,3 +1,6 @@
+// Board v1.0 notes:
+// Due to miswiring, pin 0 must be manually disconnected during programming
+
 #include <Arduino.h>
 #include <WiFiManager.h> 
 #include <TMCStepper.h>
@@ -18,10 +21,10 @@
 #define STALL_VALUE     100 // [0..255]
 
 #define MICROSTEPS        0       // Microstepping
-#define RMS_CURRENT       636     // Motor RMS current in MA. My stepper is 42SHDC3025-24B which has peak current 0.9A = 636mA RMS
+#define RMS_CURRENT       900     // Motor RMS current in MA. My stepper is 42SHDC3025-24B which has peak current 0.9A = 636mA RMS
 
 // Motor speed. Multiply by microsteps for consistency
-#define MOTOR_ACCEL       2       // Acceleration steps per microprocessor frequency
+#define MOTOR_ACCEL       6       // Acceleration steps per microprocessor frequency
 
 #define MAX_MOVE_DURATION 30000   // Number of milliseconds before a safety stop is triggered
 
@@ -32,7 +35,7 @@
 WiFiClient wifiClient;   // MQTT Controller
 
 HADevice haDevice;
-HAMqtt mqtt(wifiClient, haDevice, 3); // Num devices
+HAMqtt mqtt(wifiClient, haDevice, 4); // Num devices
 
 HACover haCover("cover", HACover::Features::PositionFeature);
 HANumber haSpeed("speed", HABaseDeviceType::NumberPrecision::PrecisionP0);
@@ -128,7 +131,7 @@ void onCoverCommand(HACover::CoverCommand cmd, HACover* sender) {
 
 void onSpeedChange(HANumeric cmd, HANumber* num) {
   move_speed = cmd.toUInt16();
-  Serial.printf("move_speed set to %d", move_speed);
+  Serial.printf("move_speed set to %d\n", move_speed);
 }
 
 void onStallThresholdChange(HANumeric cmd, HANumber* num) {
@@ -169,8 +172,6 @@ void configureMQTT() {
     haStall.setState(stall_threshold);
     haStall.setRetain(true);
 
-    
-
     mqtt.begin(MQTT_SERVER, 1883U, MQTT_USER, MQTT_PASS);
 
     Serial.printf("Begin MQTT on server \"%s\" with user \"%s\" and pass \"%s\"\n", MQTT_SERVER, MQTT_USER, MQTT_PASS);
@@ -209,7 +210,7 @@ void loopMotor() {
     // Reset 
     stall_triggered = false;
     digitalWrite(EN_PIN, HIGH);
-    delay(10);
+    delay(100);
     digitalWrite(EN_PIN, LOW);
     switch (cover_state_current) {
       case COVER_OPENING:
