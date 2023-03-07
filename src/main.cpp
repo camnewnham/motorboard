@@ -4,41 +4,44 @@
 #include <SoftwareSerial.h>
 #include <ArduinoHA.h>
 
-// My TMC https://www.aliexpress.com/item/1005002965406330.html
-
-#define EN_PIN            5       // Driver Enable pin
-#define LED_PIN           2       // D1 Mini Hardware LED
-#define DRIVER_ADDRESS    0b00    // TMC2209 Driver address
+#define EN_PIN            15       // Driver Enable pin
 #define R_SENSE           0.11f   // SilentStepStick series use 0.11
-#define ENDSTOP_0_PIN     12       // Physical input
-#define ENDSTOP_1_PIN     13       // Physical input
 
-#define SW_RX             16      // Software RX
-#define SW_TX             14      // Software TX
+
+#define ENDSTOP_0_PIN       14       // Physical input
+#define ENDSTOP_0_INVERTED  true
+#define ENDSTOP_0_PINMODE   INPUT_PULLUP
+
+#define ENDSTOP_1_PIN       16       // Physical input
+#define ENDSTOP_1_INVERTED  false
+#define ENDSTOP_1_PINMODE   INPUT_PULLDOWN_16
+
+#define SW_RX             2      // Software RX
+#define SW_TX             0      // Software TX
 
 #define MICROSTEPS        0       // Microstepping
-#define RMS_CURRENT       636     // Motor RMS current in MA. My stepper is 42SHDC3025-24B which has peak current 0.9A = 636mA RMS
+#define RMS_CURRENT       900     // Motor RMS current in MA. My stepper is 42SHDC3025-24B which has peak current 0.9A = 636mA RMS
 
 // Motor speed. Multiply by microsteps for consistency
-#define MAX_SPEED         1000 * (MICROSTEPS == 0 ? 1 : MICROSTEPS)     
+#define MAX_SPEED         500 * (MICROSTEPS == 0 ? 1 : MICROSTEPS)     
 #define MOTOR_ACCEL       2       // Acceleration steps per microprocessor frequency
 
 #define MAX_MOVE_DURATION 30000   // Number of milliseconds before a safety stop is triggered
 
+#define MQTT_SERVER "homeassistant.local"
+#define MQTT_USERNAME "user"
+#define MQTT_PASSWORD "passwd"
+
 WiFiClient wifiClient;   // MQTT Controller
-HADevice device;
-HAMqtt mqtt(wifiClient, device);
-HACover cover("coverboard", HACover::Features::PositionFeature);
-HANumber number("coverboard_speed", HABaseDeviceType::NumberPrecision::PrecisionP2);
+HADevice haDevice;
+HAMqtt mqtt(wifiClient, haDevice, 4);
+HACover haCover("coverboard", HACover::Features::PositionFeature);
+HANumber haSpeed("coverboard_speed", HABaseDeviceType::NumberPrecision::PrecisionP0);
 
 WiFiManager wifiManager; // WiFi AP controller
-WiFiManagerParameter wfm_mqtt_server("mqtt_s", "MQTT Server", "homeassistant.local", 40);
-WiFiManagerParameter wfm_mqtt_username("mqtt_u", "MQTT UserName", "user", 24);
-WiFiManagerParameter wfm_mqtt_password("mqtt_p", "MQTT Password", "passwd", 24);
-WiFiManagerParameter wfm_move_multiplier("move_mult", "Speed (0-1)", "0.5", 10);
 
 SoftwareSerial DRIVER_SERIAL(SW_RX,SW_TX);
-TMC2209Stepper driver(&DRIVER_SERIAL, R_SENSE, DRIVER_ADDRESS);   // Create TMC driver
+TMC2209Stepper driver(&DRIVER_SERIAL, R_SENSE, 0b00);   // Create TMC driver
 
 enum CoverState {
   COVER_STOPPED,
@@ -54,18 +57,18 @@ CoverState cover_state_current = COVER_STOPPED;
 int32_t current_speed = 0;
 int32_t dest_speed = 0;
 
-uint8_t endstop_0_state = HIGH;
-uint8_t endstop_1_state = HIGH;
+uint8_t endstop_0_state = LOW;
+uint8_t endstop_1_state = LOW;
 
 uint64_t move_start_time = 0;
-float_t move_speed_multiplier = 0.5;
 
 bool mqtt_initialized = false;
 
+int move_speed = MAX_SPEED;
+
 void configureDriver() {
-  pinMode(LED_PIN, OUTPUT);
   pinMode(EN_PIN, OUTPUT);
-  DRIVER_SERIAL.begin(115200);
+  DRIVER_SERIAL.begin(57600);
 
   driver.begin();
   driver.toff(5);                       // Enables driver in software
@@ -88,14 +91,10 @@ void configureDriver() {
 
 void configureWiFiAP() {
   // Collect some details for MQTT
-  wifiManager.addParameter(&wfm_mqtt_server);
-  wifiManager.addParameter(&wfm_mqtt_username);
-  wifiManager.addParameter(&wfm_mqtt_password);
-  wifiManager.addParameter(&wfm_move_multiplier);
 
   wifiManager.setConfigPortalBlocking(false);
 
-  if (digitalRead(ENDSTOP_0_PIN) == LOW && digitalRead(ENDSTOP_1_PIN) == LOW) { // Open portal if both endstops are pressed at boot
+  if (endstop_0_state && endstop_1_state) { // Open portal if both endstops are pressed at boot
     wifiManager.startConfigPortal();
   }
   else {
@@ -113,27 +112,34 @@ void onCoverCommand(HACover::CoverCommand cmd, HACover* sender) {
     }
 }
 
+void onSpeedChange(HANumeric cmd, HANumber* num) {
+  move_speed = cmd.toUInt16();
+  Serial.printf("move_speed set to %d\n", move_speed);
+}
+
 void configureMQTT() {
     byte mac[WL_MAC_ADDR_LENGTH];
     WiFi.macAddress(mac);
 
-    device.setUniqueId(mac, sizeof(mac));
-    device.setName("Coverboard");
-    device.setModel("Coverboard V1");
-    device.setManufacturer("CDN");
-    device.setSoftwareVersion("0.0.1");
+    haDevice.setUniqueId(mac, sizeof(mac));
+    haDevice.setName("Coverboard");
+    haDevice.setModel("Coverboard V1.1");
+    haDevice.setManufacturer("CDN");
+    haDevice.setSoftwareVersion("0.0.2");
 
-    cover.onCommand(onCoverCommand);
-    cover.setName("Coverboard");
-    number.setName("Coverboard Speed");
-    number.setStep(0.01);
-    number.setMin(0);
-    number.setMax(1);
+    haCover.onCommand(onCoverCommand);
+    haCover.setName("Coverboard");
+    
+    haSpeed.setName("Coverboard Speed");
+    haSpeed.setMin(100);
+    haSpeed.setMax(1000);
+    haSpeed.setMode(HANumber::Mode::ModeSlider);
+    haSpeed.onCommand(onSpeedChange);
+    haSpeed.setOptimistic(true);
+    haSpeed.setState(move_speed);
+    haSpeed.setRetain(true);
 
-    String moveSpdStr(wfm_move_multiplier.getValue());
-    move_speed_multiplier = moveSpdStr.toFloat(); 
-
-    mqtt.begin(wfm_mqtt_server.getValue(), 1883U, wfm_mqtt_username.getValue(), wfm_mqtt_password.getValue());
+    mqtt.begin(MQTT_SERVER, 1883U, MQTT_USERNAME, MQTT_PASSWORD);
 }
 
 void loopMQTT() {
@@ -151,7 +157,7 @@ void loopMQTT() {
 }
 
 void setTargetSpeed(int32_t speed) {
-  dest_speed = (speed * move_speed_multiplier);
+  dest_speed = speed;
 
   if (dest_speed == 0) { // Stops are immediate
     current_speed = dest_speed;
@@ -170,21 +176,21 @@ void setCoverState() {
     switch (cover_state_current) {
       case COVER_OPENING:
         move_start_time = millis();
-        setTargetSpeed(MAX_SPEED);
+        setTargetSpeed(move_speed);
         if (mqtt_initialized) 
         {
-          cover.setState(HACover::CoverState::StateOpening);
-          cover.setPosition(50);
+          haCover.setState(HACover::CoverState::StateOpening);
+          haCover.setPosition(50);
         }
         Serial.println("Cover state: Opening"); 
         break;
       case COVER_CLOSING:
         move_start_time = millis();
-        setTargetSpeed(-MAX_SPEED);
+        setTargetSpeed(-move_speed);
         if (mqtt_initialized) 
         {
-          cover.setState(HACover::CoverState::StateClosing);
-          cover.setPosition(0);
+          haCover.setState(HACover::CoverState::StateClosing);
+          haCover.setPosition(0);
         }
         Serial.println("Cover state: Closing"); 
         break;
@@ -192,8 +198,8 @@ void setCoverState() {
         setTargetSpeed(0);
         if (mqtt_initialized) 
         {
-          cover.setState(HACover::CoverState::StateOpen);
-          cover.setPosition(100);
+          haCover.setState(HACover::CoverState::StateOpen);
+          haCover.setPosition(100);
         }
         Serial.println("Cover state: Open"); 
         break;
@@ -201,8 +207,8 @@ void setCoverState() {
         setTargetSpeed(0);
         if (mqtt_initialized) 
         {
-          cover.setState(HACover::CoverState::StateClosed);
-          cover.setPosition(0);
+          haCover.setState(HACover::CoverState::StateClosed);
+          haCover.setPosition(0);
         }
         Serial.println("Cover state: Closed"); 
         break;
@@ -211,8 +217,8 @@ void setCoverState() {
         setTargetSpeed(0);
         if (mqtt_initialized) 
         {
-          cover.setState(HACover::CoverState::StateStopped);
-          cover.setPosition(50);
+          haCover.setState(HACover::CoverState::StateStopped);
+          haCover.setPosition(50);
         }
         Serial.println("Cover state: Stopped"); 
         break;
@@ -231,10 +237,11 @@ void setCoverState() {
   }  
 }
 
-void checkEndstop(uint8_t pin, uint8_t *state, bool is_closed_endstop) {
-  if (digitalRead(pin) == *state) return;
-  *state = digitalRead(pin);
-  if (*state == HIGH) return; // Trigger on press (not release)
+void checkEndstop(uint8_t newState, uint8_t *state, bool is_closed_endstop) {
+  if (newState == *state) return;
+  *state = newState;
+
+  if (*state == LOW) return; // Trigger on press (not release)
 
   if (is_closed_endstop) 
   {
@@ -270,12 +277,12 @@ void checkEndstop(uint8_t pin, uint8_t *state, bool is_closed_endstop) {
 
 void setup() {
   Serial.begin(115200); 
-  pinMode(LED_PIN, OUTPUT);
-
-  pinMode(ENDSTOP_0_PIN, INPUT_PULLUP);
-  pinMode(ENDSTOP_1_PIN, INPUT_PULLUP);
+  pinMode(ENDSTOP_0_PIN, ENDSTOP_0_PINMODE);
+  pinMode(ENDSTOP_1_PIN, ENDSTOP_1_PINMODE);
   endstop_0_state = digitalRead(ENDSTOP_0_PIN);
+  if (ENDSTOP_0_INVERTED) endstop_0_state = !endstop_0_state;
   endstop_1_state = digitalRead(ENDSTOP_1_PIN);
+  if (ENDSTOP_1_INVERTED) endstop_1_state = !endstop_1_state;
 
   configureWiFiAP();
   configureDriver();
@@ -287,10 +294,14 @@ void loop() {
   }
 
   wifiManager.process();
-  digitalWrite(LED_PIN, wifiManager.getConfigPortalActive() ? LOW : HIGH); // LED on while portal is active
   loopMQTT();
 
-  checkEndstop(ENDSTOP_0_PIN, &endstop_0_state, true);
-  checkEndstop(ENDSTOP_1_PIN, &endstop_1_state, false);
+  uint8_t e0state = digitalRead(ENDSTOP_0_PIN);
+  if (ENDSTOP_0_INVERTED) e0state = !e0state;
+  checkEndstop(e0state, &endstop_0_state, true);
+
+  uint8_t e1state = digitalRead(ENDSTOP_1_PIN);
+  if (ENDSTOP_1_INVERTED) e1state = !e1state;
+  checkEndstop(e1state, &endstop_1_state, false);
   setCoverState();
 }
